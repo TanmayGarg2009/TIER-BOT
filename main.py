@@ -61,6 +61,8 @@ async def create_tier_roles_if_missing(guild: discord.Guild):
         if tier not in existing_roles:
             await guild.create_role(name=tier)
 
+from ticket import Ticket  # assuming the ticket system is in ticket.py
+
 @bot.event
 async def on_ready():
     for guild in bot.guilds:
@@ -68,6 +70,10 @@ async def on_ready():
     await tree.sync()
     update_all_users.start()
     print(f"✅ Logged in as {bot.user}")
+
+    # ✅ Load the Ticket cog
+    await bot.add_cog(Ticket(bot))
+
 
 @tree.command(name="givetier", description="Assign a tier role to a player")
 @app_commands.describe(
