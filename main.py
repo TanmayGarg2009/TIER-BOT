@@ -5,7 +5,7 @@ from discord import app_commands, Interaction, Member
 from discord.ext import commands
 from discord.ui import View, Button
 from keep_alive import keep_alive
-from datetime import datetime, timedelta
+from datetime import datetime
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -28,7 +28,6 @@ REGION_CHOICES = [
 ]
 
 DATA_FILE = "tier_data.json"
-LOG_CHANNEL_ID = 1346137032933642351  # Channel where messages will be sent publicly
 
 def load_data():
     if not os.path.exists(DATA_FILE):
@@ -66,27 +65,6 @@ async def update_tier_data(member: discord.Member):
             del tier_data[str(member.id)]
     save_data(tier_data)
 
-def check_user_role_permission(member: discord.Member, bot_member: discord.Member) -> bool:
-    # Returns True if the user can use commands (user top role >= bot top role)
-    if not member.guild:
-        return False
-    user_top = member.top_role.position
-    bot_top = bot_member.top_role.position
-    return user_top >= bot_top
-
-async def send_log_message(guild: discord.Guild, description: str):
-    log_channel = guild.get_channel(LOG_CHANNEL_ID)
-    if not log_channel:
-        print(f"Log channel with ID {LOG_CHANNEL_ID} not found in guild {guild.name}")
-        return
-    embed = discord.Embed(
-        description=description,
-        color=discord.Color.green(),
-        timestamp=datetime.utcnow()
-    )
-    embed.set_footer(text="Tier System Log")
-    await log_channel.send(embed=embed)
-
 @bot.event
 async def on_ready():
     await tree.sync()
@@ -96,22 +74,8 @@ async def on_ready():
 async def on_member_update(before, after):
     await update_tier_data(after)
 
-# Universal check decorator for commands - ensures user top role >= bot top role
-def user_has_permission():
-    async def predicate(interaction: Interaction) -> bool:
-        bot_member = interaction.guild.me
-        if not check_user_role_permission(interaction.user, bot_member):
-            await interaction.response.send_message(
-                "❌ You don't have permission to use this command (your role is lower than the bot's role).",
-                ephemeral=True
-            )
-            return False
-        return True
-    return app_commands.check(predicate)
-
 # Tier commands
 @tree.command(name="givetier", description="Assign a tier role to a player")
-@user_has_permission()
 @app_commands.describe(player="The member to give the role to", username="In-game username", tier="Tier", region="Region")
 @app_commands.choices(tier=TIER_CHOICES, region=REGION_CHOICES)
 async def givetier(interaction: Interaction, player: Member, username: str, tier: app_commands.Choice[str], region: app_commands.Choice[str]):
@@ -129,24 +93,9 @@ async def givetier(interaction: Interaction, player: Member, username: str, tier
         "date": datetime.now().strftime("%d/%m/%Y")
     }
     save_data(tier_data)
-    await update_tier_data(player)
-
     await interaction.response.send_message(f"✅ Assigned {tier.value} to {player.mention}", ephemeral=True)
 
-    # Send public log message to designated channel
-    description = (
-        f"**Tier Assigned**\n"
-        f"👤 {player.mention} ({player.display_name})\n"
-        f"🎮 Username: `{username}`\n"
-        f"🏷️ Tier: **{tier.value}**\n"
-        f"🌍 Region: {region.value}\n"
-        f"📅 Date: {datetime.now().strftime('%d/%m/%Y')}\n"
-        f"🔧 By: {interaction.user.mention}"
-    )
-    await send_log_message(interaction.guild, description)
-
 @tree.command(name="removetier", description="Remove a tier role from a player")
-@user_has_permission()
 @app_commands.describe(player="The member to remove the role from", tier="Tier")
 @app_commands.choices(tier=TIER_CHOICES)
 async def removetier(interaction: Interaction, player: Member, tier: app_commands.Choice[str]):
@@ -159,18 +108,7 @@ async def removetier(interaction: Interaction, player: Member, tier: app_command
     await update_tier_data(player)
     await interaction.response.send_message(f"✅ Removed {tier.value} from {player.mention}", ephemeral=True)
 
-    # Send public log message to designated channel
-    description = (
-        f"**Tier Removed**\n"
-        f"👤 {player.mention} ({player.display_name})\n"
-        f"🏷️ Tier: **{tier.value}**\n"
-        f"📅 Date: {datetime.now().strftime('%d/%m/%Y')}\n"
-        f"🔧 By: {interaction.user.mention}"
-    )
-    await send_log_message(interaction.guild, description)
-
 @tree.command(name="tier", description="Check a user's tier info")
-@user_has_permission()
 @app_commands.describe(player="The member to check")
 async def tier(interaction: Interaction, player: Member):
     await update_tier_data(player)
@@ -183,7 +121,6 @@ async def tier(interaction: Interaction, player: Member):
         await interaction.response.send_message("No tier data found.", ephemeral=True)
 
 @tree.command(name="database", description="View full tier database")
-@user_has_permission()
 async def database(interaction: Interaction):
     # Refresh all users
     for member in interaction.guild.members:
@@ -202,10 +139,151 @@ async def database(interaction: Interaction):
         await interaction.channel.send(chunk)
     await interaction.response.send_message("✅ Database displayed.", ephemeral=True)
 
-# --- Your existing ticket system code remains unchanged ---
-# ... (I omitted ticket system here to focus on your request, but you should keep it as is)
+# Ticket system integration
 
-# ... (Keep your ticket system code here as before)
+class TicketButtons(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(Button(label="Support", style=discord.ButtonStyle.blurple, custom_id="ticket_support"))
+        self.add_item(Button(label="Whitelist", style=discord.ButtonStyle.green, custom_id="ticket_whitelist"))
+        self.add_item(Button(label="Purge", style=discord.ButtonStyle.red, custom_id="ticket_purge"))
+        self.add_item(Button(label="High Test", style=discord.ButtonStyle.gray, custom_id="ticket_hightest"))
+
+    async def interaction_check(self, interaction: Interaction) -> bool:
+        # Enable/disable High Test button based on LT3+ role
+        lt3_index = TIERS.index("LT3")
+        user_tiers = [role.name for role in interaction.user.roles if role.name in TIERS]
+        user_highest = max((TIERS.index(t) for t in user_tiers), default=-1)
+        high_test_button = next((btn for btn in self.children if btn.custom_id == "ticket_hightest"), None)
+        if high_test_button:
+            high_test_button.disabled = user_highest < lt3_index
+        return True
+
+@tree.command(name="setup_ticket", description="Setup the ticket system in this channel")
+async def setup_ticket(interaction: Interaction):
+    # Only allow this command in your server
+    if interaction.guild.id != 1346134488547332217:
+        await interaction.response.send_message("This command can only be used in the main server.", ephemeral=True)
+        return
+
+    guild = interaction.guild
+
+    # Create categories if not exist
+    category_names = ["support", "whitelist", "purge", "high test"]
+    categories = {}
+    for cat_name in category_names:
+        category = discord.utils.get(guild.categories, name=cat_name)
+        if not category:
+            category = await guild.create_category(cat_name)
+        categories[cat_name] = category
+
+    view = TicketButtons()
+    await interaction.channel.send("🎟 **Select a ticket category:**", view=view)
+    await interaction.response.send_message("✅ Ticket system setup in this channel!", ephemeral=True)
+
+@bot.event
+async def on_interaction(interaction: Interaction):
+    if interaction.type == discord.InteractionType.component:
+        custom_id = interaction.data.get("custom_id", "")
+        if custom_id.startswith("ticket_"):
+            category_key = custom_id.replace("ticket_", "")
+
+            # Check LT3+ role for High Test category
+            if category_key == "hightest":
+                lt3_index = TIERS.index("LT3")
+                user_tiers = [role.name for role in interaction.user.roles if role.name in TIERS]
+                user_highest = max((TIERS.index(t) for t in user_tiers), default=-1)
+                if user_highest < lt3_index:
+                    await interaction.response.send_message("❌ You need to have LT3 or higher to open this ticket.", ephemeral=True)
+                    return
+
+            # Find or create the category
+            category_name_map = {
+                "support": "support",
+                "whitelist": "whitelist",
+                "purge": "purge",
+                "hightest": "high test"
+            }
+            cat_name = category_name_map.get(category_key)
+            if not cat_name:
+                await interaction.response.send_message("Unknown ticket category.", ephemeral=True)
+                return
+
+            guild = interaction.guild
+            category = discord.utils.get(guild.categories, name=cat_name)
+            if not category:
+                category = await guild.create_category(cat_name)
+
+            # Channel name format: discordname-category
+            channel_name = f"{interaction.user.name}-{cat_name}".lower().replace(" ", "-")
+
+            # Check if a ticket channel already exists with the same name
+            existing_channel = discord.utils.get(category.channels, name=channel_name)
+            if existing_channel:
+                await interaction.response.send_message(f"You already have an open ticket in {existing_channel.mention}", ephemeral=True)
+                return
+
+            # Check if user has LT3 or above for all tickets except Purge and Whitelist? 
+            # You asked only for High Test to require LT3, so no need here.
+
+            # Create the channel in the category
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+                guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+            }
+
+            # Also allow roles with LT3+ to view tickets
+            lt3_index = TIERS.index("LT3")
+            for role in guild.roles:
+                if role.name in TIERS:
+                    role_index = TIERS.index(role.name)
+                    if role_index >= lt3_index:
+                        overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+
+            channel = await guild.create_text_channel(channel_name, category=category, overwrites=overwrites)
+            await channel.send(f"📩 Ticket created by {interaction.user.mention} for **{cat_name.capitalize()}**.")
+
+            await interaction.response.send_message(f"🎫 Your **{cat_name.capitalize()}** ticket has been created: {channel.mention}", ephemeral=True)
+
+# Ticket management commands
+
+@tree.command(name="close", description="Close this ticket channel")
+async def close(interaction: Interaction):
+    if isinstance(interaction.channel, discord.TextChannel):
+        # Only allow close in ticket categories
+        if interaction.channel.category and interaction.channel.category.name.lower() in ["support", "whitelist", "purge", "high test"]:
+            await interaction.response.send_message("Closing this ticket in 5 seconds...", ephemeral=True)
+            await discord.utils.sleep_until(datetime.utcnow() + timedelta(seconds=5))
+            await interaction.channel.delete()
+        else:
+            await interaction.response.send_message("This command can only be used inside a ticket channel.", ephemeral=True)
+    else:
+        await interaction.response.send_message("This command can only be used inside a ticket channel.", ephemeral=True)
+
+@tree.command(name="add_user", description="Add a user to this ticket")
+@app_commands.describe(user="The user to add to the ticket")
+async def add_user(interaction: Interaction, user: Member):
+    if isinstance(interaction.channel, discord.TextChannel):
+        if interaction.channel.category and interaction.channel.category.name.lower() in ["support", "whitelist", "purge", "high test"]:
+            await interaction.channel.set_permissions(user, read_messages=True, send_messages=True)
+            await interaction.response.send_message(f"✅ Added {user.mention} to this ticket.", ephemeral=True)
+        else:
+            await interaction.response.send_message("This command can only be used inside a ticket channel.", ephemeral=True)
+    else:
+        await interaction.response.send_message("This command can only be used inside a ticket channel.", ephemeral=True)
+
+@tree.command(name="remove_user", description="Remove a user from this ticket")
+@app_commands.describe(user="The user to remove from the ticket")
+async def remove_user(interaction: Interaction, user: Member):
+    if isinstance(interaction.channel, discord.TextChannel):
+        if interaction.channel.category and interaction.channel.category.name.lower() in ["support", "whitelist", "purge", "high test"]:
+            await interaction.channel.set_permissions(user, overwrite=None)
+            await interaction.response.send_message(f"❌ Removed {user.mention} from this ticket.", ephemeral=True)
+        else:
+            await interaction.response.send_message("This command can only be used inside a ticket channel.", ephemeral=True)
+    else:
+        await interaction.response.send_message("This command can only be used inside a ticket channel.", ephemeral=True)
 
 keep_alive()
 token = os.getenv("TOKEN")
