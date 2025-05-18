@@ -17,16 +17,17 @@ intents.presences = False
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
+# Constants
 ALLOWED_ROLE_NAME = "Admin"
 ANNOUNCE_CHANNEL_ID = 1346137032933642351
 TIERS = ["LT5", "LT4", "LT3", "LT2", "LT1", "HT5", "HT4", "HT3", "HT2", "HT1"]
 DATA_FILE = "tier_data.json"
-
 REGIONS = ["AS", "NA", "EU"]
 TIER_CHOICES = [app_commands.Choice(name=tier, value=tier) for tier in TIERS]
 REGION_CHOICES = [app_commands.Choice(name=region, value=region) for region in REGIONS]
 
 
+# Data Management
 def load_data():
     if not os.path.exists(DATA_FILE) or os.stat(DATA_FILE).st_size == 0:
         return {}
@@ -42,6 +43,7 @@ def save_data(data):
 tier_data = load_data()
 
 
+# Role Utility Functions
 def get_highest_tier(roles):
     tier_ranks = {name: i for i, name in enumerate(TIERS)}
     user_tiers = [role.name for role in roles if role.name in tier_ranks]
@@ -59,6 +61,7 @@ async def create_tier_roles_if_missing(guild: discord.Guild):
             await guild.create_role(name=tier)
 
 
+# Bot Events
 @bot.event
 async def on_ready():
     for guild in bot.guilds:
@@ -68,6 +71,43 @@ async def on_ready():
     print(f"✅ Logged in as {bot.user}")
 
 
+# Ticket System
+class TicketView(discord.ui.View):
+    def __init__(self):
+        super().__init__()
+        self.add_item(discord.ui.Button(label="Support", style=discord.ButtonStyle.primary, custom_id="ticket_support"))
+        self.add_item(discord.ui.Button(label="Whitelist", style=discord.ButtonStyle.success, custom_id="ticket_whitelist"))
+        self.add_item(discord.ui.Button(label="Purge", style=discord.ButtonStyle.danger, custom_id="ticket_purge"))
+        self.add_item(discord.ui.Button(label="High Test", style=discord.ButtonStyle.secondary, custom_id="ticket_high_test"))
+
+    @discord.ui.button(label="High Test", style=discord.ButtonStyle.secondary, custom_id="ticket_high_test")
+    async def high_test_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not any(role.name in TIERS[:3] for role in interaction.user.roles):  # Checks if user has LT3+
+            await interaction.response.send_message("❌ You don't have permission to access this.", ephemeral=True)
+            return
+        await interaction.response.send_message("✅ High Test ticket created!", ephemeral=True)
+
+
+@tree.command(name="setup_ticket", description="Setup a ticket system in this channel")
+async def setup_ticket(interaction: discord.Interaction):
+    if not has_allowed_role(interaction):
+        await interaction.response.send_message("❌ You don't have permission.", ephemeral=True)
+        return
+
+    embed = discord.Embed(title="Ticket System", color=discord.Color.blue())
+    embed.description = (
+        "Select a ticket type below:\n"
+        "1️⃣ **Support** - General help\n"
+        "2️⃣ **Whitelist** - Apply for whitelist\n"
+        "3️⃣ **Purge** - Request data purge\n"
+        "4️⃣ **High Test** - Advanced testing (Visible to LT3+)"
+    )
+
+    view = TicketView()
+    await interaction.response.send_message(embed=embed, view=view)
+
+
+# Tier Management Commands
 @tree.command(name="givetier", description="Assign a tier role to a player")
 @app_commands.describe(
     player="The member to give the role to",
@@ -107,80 +147,8 @@ async def givetier(
         f"✅ Assigned role '{tier.value}' to {player.mention}.", ephemeral=True
     )
 
-    channel = bot.get_channel(ANNOUNCE_CHANNEL_ID)
-    if channel:
-        embed = discord.Embed(title="Tier Assigned", color=discord.Color.green())
-        embed.add_field(name="Discord Name", value=str(interaction.user), inline=False)
-        embed.add_field(name="Username", value=username, inline=False)
-        embed.add_field(name="Region", value=region.value, inline=False)
-        embed.add_field(name="Rank Earned", value=tier.value, inline=False)
-        embed.add_field(name="Date", value=datetime.now().strftime("%d/%m/%Y"), inline=False)
-        await channel.send(embed=embed)
 
-
-@tree.command(name="removetier", description="Remove a tier role from a player")
-@app_commands.describe(player="The member", tier="Tier to remove")
-@app_commands.choices(tier=TIER_CHOICES)
-async def removetier(interaction: discord.Interaction, player: discord.Member, tier: app_commands.Choice[str]):
-    if not has_allowed_role(interaction):
-        await interaction.response.send_message("❌ You don't have permission.", ephemeral=True)
-        return
-
-    role = discord.utils.get(interaction.guild.roles, name=tier.value)
-    if role is None or role not in player.roles:
-        await interaction.response.send_message(f"{player.mention} doesn't have the role.", ephemeral=True)
-        return
-
-    await player.remove_roles(role)
-    highest = get_highest_tier(player.roles)
-
-    if highest:
-        tier_data[str(player.id)]["tier"] = highest
-    else:
-        tier_data.pop(str(player.id), None)
-    save_data(tier_data)
-
-    await interaction.response.send_message(
-        f"✅ Removed role '{tier.value}' from {player.mention}.", ephemeral=True
-    )
-
-    channel = bot.get_channel(ANNOUNCE_CHANNEL_ID)
-    if channel:
-        embed = discord.Embed(title="Tier Removed", color=discord.Color.red())
-        embed.add_field(name="Discord Name", value=str(interaction.user), inline=False)
-        embed.add_field(name="Username", value=str(player), inline=False)
-        embed.add_field(name="Rank Removed", value=tier.value, inline=False)
-        await channel.send(embed=embed)
-
-
-@tree.command(name="tier", description="Check a player's tier info")
-@app_commands.describe(player="The player to check")
-async def tier(interaction: discord.Interaction, player: discord.Member):
-    info = tier_data.get(str(player.id))
-    if not info:
-        await interaction.response.send_message("No tier data found for this user.", ephemeral=True)
-        return
-
-    response = (
-        f"{info['discord_name']}  {info['username']}  {info['tier']}  {info['region']}  {info['date']}"
-    )
-    await interaction.response.send_message(response, ephemeral=True)
-
-
-@tree.command(name="database", description="List all users with tier info")
-async def database(interaction: discord.Interaction):
-    await update_all_users_function()
-    if not tier_data:
-        await interaction.response.send_message("Database is empty.", ephemeral=True)
-        return
-
-    message = "**Tier Database:**\n\n"
-    for uid, data in tier_data.items():
-        message += f"{data['discord_name']} | {data['username']} | {data['tier']}\n"
-
-    await interaction.response.send_message(message[:2000], ephemeral=True)
-
-
+# Automatic User Update Task
 @tasks.loop(minutes=10)
 async def update_all_users():
     await update_all_users_function()
