@@ -5,36 +5,47 @@ import os
 import json
 from datetime import datetime
 
+# === Configuration ===
+GUILD_ID = 123456789012345678  # <-- Replace with your actual guild/server ID
+TIERS = ["LT5", "LT4", "LT3", "LT2", "LT1", "HT5", "HT4", "HT3", "HT2", "HT1"]
+TIER_ROLES = set(TIERS)
+TICKET_OPTIONS = [
+    ("Support", "support"),
+    ("Whitelist", "whitelist"),
+    ("Purge", "purge"),
+    ("High Test", "hightest"),
+    ("Other", "other")
+]
+DATA_FILE = "tier_data.json"
+
+# === Bot Setup ===
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
-
-# Replace this with your actual server ID
-GUILD_ID = 123456789012345678  # <-- UPDATE THIS
 GUILD = discord.Object(id=GUILD_ID)
 
-TIERS = ["LT5", "LT4", "LT3", "LT2", "LT1", "HT5", "HT4", "HT3", "HT2", "HT1"]
 tier_data = {}
 
+# === Data Handling ===
+def save_data():
+    with open(DATA_FILE, "w") as f:
+        json.dump(tier_data, f, indent=2)
+
+def load_data():
+    global tier_data
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r") as f:
+            tier_data = json.load(f)
+
+# === Events ===
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
     await bot.tree.sync(guild=GUILD)
     print(f"✅ Slash commands synced to guild: {GUILD_ID}")
 
-def save_data():
-    with open("tier_data.json", "w") as f:
-        json.dump(tier_data, f, indent=2)
-
-def load_data():
-    global tier_data
-    if os.path.exists("tier_data.json"):
-        with open("tier_data.json", "r") as f:
-            tier_data = json.load(f)
-
 # === Tier Commands ===
-
 @bot.tree.command(name="givetier", description="Give a tier role", guild=GUILD)
 @app_commands.describe(member="User", tier="Tier name", username="Minecraft IGN")
 async def givetier(interaction: discord.Interaction, member: discord.Member, tier: str, username: str):
@@ -78,19 +89,10 @@ async def database(interaction: discord.Interaction):
     await interaction.response.send_message(msg[:2000], ephemeral=True)
 
 # === Ticket System ===
-
-TICKET_OPTIONS = [
-    ("Support", "support"),
-    ("Whitelist", "whitelist"),
-    ("Purge", "purge"),
-    ("High Test", "hightest"),
-    ("Other", "other")
-]
-
 class TicketSelect(discord.ui.Select):
     def __init__(self):
         options = [discord.SelectOption(label=name, value=value) for name, value in TICKET_OPTIONS]
-        super().__init__(placeholder="Choose a ticket type", options=options)
+        super().__init__(placeholder="Choose a ticket type", options=options, min_values=1, max_values=1)
 
     async def callback(self, interaction: discord.Interaction):
         category_name = "Tickets"
@@ -101,11 +103,21 @@ class TicketSelect(discord.ui.Select):
         overwrites = {
             interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
             interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-            interaction.guild.me: discord.PermissionOverwrite(read_messages=True),
+            interaction.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True),
         }
 
+        # Make "High Test" only visible to LT3+
+        if self.values[0] == "hightest":
+            for role in interaction.user.roles:
+                if role.name in TIERS and TIERS.index(role.name) <= TIERS.index("LT3"):
+                    break
+            else:
+                await interaction.response.send_message("❌ You need LT3 or higher to open this ticket.", ephemeral=True)
+                return
+
+        channel_name = f"{self.values[0]}_{interaction.user.name}".lower()[:90]
         channel = await interaction.guild.create_text_channel(
-            name=f"{self.values[0]}_{interaction.user.name}",
+            name=channel_name,
             category=category,
             overwrites=overwrites
         )
@@ -113,7 +125,7 @@ class TicketSelect(discord.ui.Select):
 
 class TicketView(discord.ui.View):
     def __init__(self):
-        super().__init__()
+        super().__init__(timeout=None)
         self.add_item(TicketSelect())
 
 @bot.tree.command(name="setup_ticket", description="Set up the ticket system", guild=GUILD)
@@ -141,6 +153,9 @@ async def removeuser(interaction: discord.Interaction, user: discord.Member):
     await interaction.response.send_message(f"✅ {user.mention} removed.")
 
 # === Launch Bot ===
-
 load_data()
-bot.run(os.getenv("TOKEN"))
+token = os.getenv("TOKEN")
+if not token:
+    print("❌ TOKEN not found in environment variables.")
+else:
+    bot.run(token)
