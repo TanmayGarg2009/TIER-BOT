@@ -1,212 +1,118 @@
-import os
-import json
 import discord
-from discord.ext import commands, tasks
-from discord import app_commands
-from datetime import datetime
-from keep_alive import keep_alive
+from discord import app_commands, Interaction, SelectOption
+from discord.ext import commands
+from discord.ui import View, Select
 
-intents = discord.Intents.default()
-intents.message_content = True
-intents.members = True
-intents.guilds = True
-intents.guild_messages = True
-intents.guild_reactions = True
-intents.presences = False
-
-bot = commands.Bot(command_prefix="!", intents=intents)
-tree = bot.tree
-
-ALLOWED_ROLE_NAME = "Admin"
-ANNOUNCE_CHANNEL_ID = 1346137032933642351
+# Tier constants (used to check if user is LT3 or higher)
 TIERS = ["LT5", "LT4", "LT3", "LT2", "LT1", "HT5", "HT4", "HT3", "HT2", "HT1"]
-DATA_FILE = "tier_data.json"
+ADMIN_ROLE_NAME = "ヅAdmin"  # Target role for access
+GUILD_ID = 1346134488547332217  # Replace with your actual server ID
 
-REGIONS = ["AS", "NA", "EU"]
-TIER_CHOICES = [app_commands.Choice(name=tier, value=tier) for tier in TIERS]
-REGION_CHOICES = [app_commands.Choice(name=region, value=region) for region in REGIONS]
-
-
-def load_data():
-    if not os.path.exists(DATA_FILE) or os.stat(DATA_FILE).st_size == 0:
-        return {}
-    with open(DATA_FILE, "r") as f:
-        return json.load(f)
-
-
-def save_data(data):
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-
-
-tier_data = load_data()
-
-
+# Function to get highest tier role from a member
 def get_highest_tier(roles):
-    tier_ranks = {name: i for i, name in enumerate(TIERS)}
-    user_tiers = [role.name for role in roles if role.name in tier_ranks]
-    return max(user_tiers, key=lambda x: tier_ranks[x], default=None)
+    tier_roles = [role.name for role in roles if role.name in TIERS]
+    if not tier_roles:
+        return None
+    return sorted(tier_roles, key=lambda x: TIERS.index(x))[-1]
 
+# Function to check if user has Admin or higher
+def has_admin_or_higher(member: discord.Member):
+    admin_role = discord.utils.get(member.guild.roles, name=ADMIN_ROLE_NAME)
+    if not admin_role:
+        return False
+    return any(role.position >= admin_role.position for role in member.roles)
 
-def has_allowed_role(interaction: discord.Interaction):
-    return any(role.name == ALLOWED_ROLE_NAME for role in interaction.user.roles)
+class TicketSelect(Select):
+    def __init__(self, user: discord.Member):
+        options = [
+            SelectOption(label="Support", value="Support", description="General support."),
+            SelectOption(label="Whitelist", value="Whitelist", description="Whitelist request."),
+            SelectOption(label="Purge", value="Purge", description="Request a purge."),
+        ]
 
+        if get_highest_tier(user.roles) in TIERS[2:]:  # LT3 or higher
+            options.append(SelectOption(label="High test", value="High test", description="High level test request."))
 
-async def create_tier_roles_if_missing(guild: discord.Guild):
-    existing_roles = [role.name for role in guild.roles]
-    for tier in TIERS:
-        if tier not in existing_roles:
-            await guild.create_role(name=tier)
+        super().__init__(
+            placeholder="Choose a ticket type...",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
 
+    async def callback(self, interaction: Interaction):
+        ticket_type = self.values[0]
+        guild = interaction.guild
+        user = interaction.user
+
+        category = discord.utils.get(guild.categories, name=ticket_type)
+        if not category:
+            category = await guild.create_category(ticket_type)
+
+        channel_name = f"{user.name}_{ticket_type}".replace(" ", "_").lower()
+        existing_channel = discord.utils.get(category.channels, name=channel_name)
+        if existing_channel:
+            await interaction.response.send_message(f"❌ You already have an open ticket: {existing_channel.mention}", ephemeral=True)
+            return
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+        }
+
+        # Allow Admin and all roles above Admin
+        for role in guild.roles:
+            if role.name == ADMIN_ROLE_NAME or role.position >= discord.utils.get(guild.roles, name=ADMIN_ROLE_NAME).position:
+                overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+
+        channel = await guild.create_text_channel(channel_name, category=category, overwrites=overwrites)
+        await channel.send(f"<@&{discord.utils.get(guild.roles, name=ADMIN_ROLE_NAME).id}> {user.mention}, welcome to your `{ticket_type}` ticket!")
+        await interaction.response.send_message(f"🎟️ Ticket created: {channel.mention}", ephemeral=True)
+
+class TicketView(View):
+    def __init__(self, user: discord.Member):
+        super().__init__(timeout=None)
+        self.add_item(TicketSelect(user))
+
+class MyBot(commands.Bot):
+    def __init__(self):
+        super().__init__(command_prefix="!", intents=discord.Intents.all())
+        self.tree = app_commands.CommandTree(self)
+
+    async def setup_hook(self):
+        self.tree.copy_global_to(guild=discord.Object(id=GUILD_ID))
+        await self.tree.sync(guild=discord.Object(id=GUILD_ID))
+
+bot = MyBot()
 
 @bot.event
 async def on_ready():
-    for guild in bot.guilds:
-        await create_tier_roles_if_missing(guild)
-    await tree.sync()
-    update_all_users.start()
     print(f"✅ Logged in as {bot.user}")
 
-
-@tree.command(name="givetier", description="Assign a tier role to a player")
-@app_commands.describe(
-    player="The member to give the role to",
-    tier="The tier role to assign",
-    region="Select the region",
-    username="Enter their in-game username"
-)
-@app_commands.choices(tier=TIER_CHOICES, region=REGION_CHOICES)
-async def givetier(
-    interaction: discord.Interaction,
-    player: discord.Member,
-    tier: app_commands.Choice[str],
-    region: app_commands.Choice[str],
-    username: str
-):
-    if not has_allowed_role(interaction):
-        await interaction.response.send_message("❌ You don't have permission.", ephemeral=True)
+@bot.tree.command(name="setup_ticket", description="Set up the ticket panel in this channel")
+async def setup_ticket(interaction: Interaction):
+    if not has_admin_or_higher(interaction.user):
+        await interaction.response.send_message("❌ You don't have permission to use this.", ephemeral=True)
         return
 
-    role = discord.utils.get(interaction.guild.roles, name=tier.value)
-    if role is None:
-        await interaction.response.send_message("❌ Role not found.", ephemeral=True)
-        return
+    view = TicketView(interaction.user)
+    await interaction.response.send_message("📬 **Select a ticket option below to create your ticket:**", view=view)
 
-    await player.add_roles(role)
-    highest = get_highest_tier(player.roles)
-    tier_data[str(player.id)] = {
-        "discord_name": str(player),
-        "username": username,
-        "tier": highest,
-        "region": region.value,
-        "date": datetime.now().strftime("%d/%m/%Y")
-    }
-    save_data(tier_data)
+@bot.tree.command(name="adduser", description="Add a user to this ticket channel")
+@app_commands.describe(user="User to add")
+async def add_user(interaction: Interaction, user: discord.Member):
+    channel = interaction.channel
+    if isinstance(channel, discord.TextChannel):
+        await channel.set_permissions(user, view_channel=True, send_messages=True, read_message_history=True)
+        await interaction.response.send_message(f"✅ {user.mention} has been added to the ticket.", ephemeral=True)
 
-    await interaction.response.send_message(
-        f"✅ Assigned role '{tier.value}' to {player.mention}.", ephemeral=True
-    )
+@bot.tree.command(name="removeuser", description="Remove a user from this ticket channel")
+@app_commands.describe(user="User to remove")
+async def remove_user(interaction: Interaction, user: discord.Member):
+    channel = interaction.channel
+    if isinstance(channel, discord.TextChannel):
+        await channel.set_permissions(user, overwrite=None)
+        await interaction.response.send_message(f"✅ {user.mention} has been removed from the ticket.", ephemeral=True)
 
-    channel = bot.get_channel(ANNOUNCE_CHANNEL_ID)
-    if channel:
-        embed = discord.Embed(title="Tier Assigned", color=discord.Color.green())
-        embed.add_field(name="Discord Name", value=str(interaction.user), inline=False)
-        embed.add_field(name="Username", value=username, inline=False)
-        embed.add_field(name="Region", value=region.value, inline=False)
-        embed.add_field(name="Rank Earned", value=tier.value, inline=False)
-        embed.add_field(name="Date", value=datetime.now().strftime("%d/%m/%Y"), inline=False)
-        await channel.send(embed=embed)
-
-
-@tree.command(name="removetier", description="Remove a tier role from a player")
-@app_commands.describe(player="The member", tier="Tier to remove")
-@app_commands.choices(tier=TIER_CHOICES)
-async def removetier(interaction: discord.Interaction, player: discord.Member, tier: app_commands.Choice[str]):
-    if not has_allowed_role(interaction):
-        await interaction.response.send_message("❌ You don't have permission.", ephemeral=True)
-        return
-
-    role = discord.utils.get(interaction.guild.roles, name=tier.value)
-    if role is None or role not in player.roles:
-        await interaction.response.send_message(f"{player.mention} doesn't have the role.", ephemeral=True)
-        return
-
-    await player.remove_roles(role)
-    highest = get_highest_tier(player.roles)
-
-    if highest:
-        tier_data[str(player.id)]["tier"] = highest
-    else:
-        tier_data.pop(str(player.id), None)
-    save_data(tier_data)
-
-    await interaction.response.send_message(
-        f"✅ Removed role '{tier.value}' from {player.mention}.", ephemeral=True
-    )
-
-    channel = bot.get_channel(ANNOUNCE_CHANNEL_ID)
-    if channel:
-        embed = discord.Embed(title="Tier Removed", color=discord.Color.red())
-        embed.add_field(name="Discord Name", value=str(interaction.user), inline=False)
-        embed.add_field(name="Username", value=str(player), inline=False)
-        embed.add_field(name="Rank Removed", value=tier.value, inline=False)
-        await channel.send(embed=embed)
-
-
-@tree.command(name="tier", description="Check a player's tier info")
-@app_commands.describe(player="The player to check")
-async def tier(interaction: discord.Interaction, player: discord.Member):
-    info = tier_data.get(str(player.id))
-    if not info:
-        await interaction.response.send_message("No tier data found for this user.", ephemeral=True)
-        return
-
-    response = (
-        f"{info['discord_name']}  {info['username']}  {info['tier']}  {info['region']}  {info['date']}"
-    )
-    await interaction.response.send_message(response, ephemeral=True)
-
-
-@tree.command(name="database", description="List all users with tier info")
-async def database(interaction: discord.Interaction):
-    await update_all_users_function()
-    if not tier_data:
-        await interaction.response.send_message("Database is empty.", ephemeral=True)
-        return
-
-    message = "**Tier Database:**\n\n"
-    for uid, data in tier_data.items():
-        message += f"{data['discord_name']} | {data['username']} | {data['tier']}\n"
-
-    await interaction.response.send_message(message[:2000], ephemeral=True)
-
-
-@tasks.loop(minutes=10)
-async def update_all_users():
-    await update_all_users_function()
-
-
-async def update_all_users_function():
-    for guild in bot.guilds:
-        for member in guild.members:
-            highest = get_highest_tier(member.roles)
-            if highest:
-                current = tier_data.get(str(member.id), {})
-                tier_data[str(member.id)] = {
-                    "discord_name": str(member),
-                    "username": current.get("username", "Unknown"),
-                    "tier": highest,
-                    "region": current.get("region", "Unknown"),
-                    "date": current.get("date", "Unknown")
-                }
-            elif str(member.id) in tier_data:
-                tier_data.pop(str(member.id))
-    save_data(tier_data)
-
-
-keep_alive()
-token = os.getenv("TOKEN")
-if not token:
-    raise Exception("No token found. Please set your bot token as an environment variable named 'TOKEN'.")
-
-bot.run(token)
+# Start the bot
+bot.run(os.environ['TOKEN'])
