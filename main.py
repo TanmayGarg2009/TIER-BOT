@@ -1,118 +1,154 @@
 import discord
-from discord import app_commands, Interaction, SelectOption
+from discord import app_commands
 from discord.ext import commands
-from discord.ui import View, Select
+import json
+import os
+from datetime import datetime
 
-# Tier constants (used to check if user is LT3 or higher)
-TIERS = ["LT5", "LT4", "LT3", "LT2", "LT1", "HT5", "HT4", "HT3", "HT2", "HT1"]
-ADMIN_ROLE_NAME = "ヅAdmin"  # Target role for access
-GUILD_ID = 1346134488547332217  # Replace with your actual server ID
+TOKEN = os.getenv("TOKEN") or "YOUR_TOKEN_HERE"
+GUILD_ID = 1346134488547332217  # Replace with your server ID
+TIER_LOG_CHANNEL_ID = 123456789012345678  # Replace with your log channel ID
 
-# Function to get highest tier role from a member
+TIER_ROLES = ["HT1", "HT2", "HT3", "LT1", "LT2", "LT3", "LT4", "LT5"]
+DATA_FILE = "tiers.json"
+
+intents = discord.Intents.default()
+intents.members = True
+intents.guilds = True
+intents.message_content = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+def load_data():
+    if not os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "w") as f:
+            json.dump({}, f)
+    with open(DATA_FILE, "r") as f:
+        return json.load(f)
+
+def save_data(data):
+    with open(DATA_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+
 def get_highest_tier(roles):
-    tier_roles = [role.name for role in roles if role.name in TIERS]
-    if not tier_roles:
+    tier_order = {role: i for i, role in enumerate(TIER_ROLES)}
+    user_tiers = [r.name for r in roles if r.name in tier_order]
+    if not user_tiers:
         return None
-    return sorted(tier_roles, key=lambda x: TIERS.index(x))[-1]
-
-# Function to check if user has Admin or higher
-def has_admin_or_higher(member: discord.Member):
-    admin_role = discord.utils.get(member.guild.roles, name=ADMIN_ROLE_NAME)
-    if not admin_role:
-        return False
-    return any(role.position >= admin_role.position for role in member.roles)
-
-class TicketSelect(Select):
-    def __init__(self, user: discord.Member):
-        options = [
-            SelectOption(label="Support", value="Support", description="General support."),
-            SelectOption(label="Whitelist", value="Whitelist", description="Whitelist request."),
-            SelectOption(label="Purge", value="Purge", description="Request a purge."),
-        ]
-
-        if get_highest_tier(user.roles) in TIERS[2:]:  # LT3 or higher
-            options.append(SelectOption(label="High test", value="High test", description="High level test request."))
-
-        super().__init__(
-            placeholder="Choose a ticket type...",
-            min_values=1,
-            max_values=1,
-            options=options
-        )
-
-    async def callback(self, interaction: Interaction):
-        ticket_type = self.values[0]
-        guild = interaction.guild
-        user = interaction.user
-
-        category = discord.utils.get(guild.categories, name=ticket_type)
-        if not category:
-            category = await guild.create_category(ticket_type)
-
-        channel_name = f"{user.name}_{ticket_type}".replace(" ", "_").lower()
-        existing_channel = discord.utils.get(category.channels, name=channel_name)
-        if existing_channel:
-            await interaction.response.send_message(f"❌ You already have an open ticket: {existing_channel.mention}", ephemeral=True)
-            return
-
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
-        }
-
-        # Allow Admin and all roles above Admin
-        for role in guild.roles:
-            if role.name == ADMIN_ROLE_NAME or role.position >= discord.utils.get(guild.roles, name=ADMIN_ROLE_NAME).position:
-                overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
-
-        channel = await guild.create_text_channel(channel_name, category=category, overwrites=overwrites)
-        await channel.send(f"<@&{discord.utils.get(guild.roles, name=ADMIN_ROLE_NAME).id}> {user.mention}, welcome to your `{ticket_type}` ticket!")
-        await interaction.response.send_message(f"🎟️ Ticket created: {channel.mention}", ephemeral=True)
-
-class TicketView(View):
-    def __init__(self, user: discord.Member):
-        super().__init__(timeout=None)
-        self.add_item(TicketSelect(user))
-
-class MyBot(commands.Bot):
-    def __init__(self):
-        super().__init__(command_prefix="!", intents=discord.Intents.all())
-        self.tree = app_commands.CommandTree(self)
-
-    async def setup_hook(self):
-        self.tree.copy_global_to(guild=discord.Object(id=GUILD_ID))
-        await self.tree.sync(guild=discord.Object(id=GUILD_ID))
-
-bot = MyBot()
+    return min(user_tiers, key=lambda r: tier_order[r])
 
 @bot.event
 async def on_ready():
-    print(f"✅ Logged in as {bot.user}")
+    await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
+    print(f"Logged in as {bot.user}")
 
-@bot.tree.command(name="setup_ticket", description="Set up the ticket panel in this channel")
-async def setup_ticket(interaction: Interaction):
-    if not has_admin_or_higher(interaction.user):
-        await interaction.response.send_message("❌ You don't have permission to use this.", ephemeral=True)
+@bot.tree.command(name="givetier", description="Assign a tier role", guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(discord_name="Their Discord name", username="Their in-game username", region="AS/NA/EU", tier="Tier to assign")
+@app_commands.choices(
+    region=[
+        app_commands.Choice(name="Asia", value="AS"),
+        app_commands.Choice(name="North America", value="NA"),
+        app_commands.Choice(name="Europe", value="EU")
+    ],
+    tier=[app_commands.Choice(name=t, value=t) for t in TIER_ROLES]
+)
+async def givetier(interaction: discord.Interaction, discord_name: str, username: str, region: app_commands.Choice[str], tier: app_commands.Choice[str]):
+    await interaction.response.defer(ephemeral=False)
+    member = interaction.guild.get_member_named(discord_name)
+    if not member:
+        await interaction.followup.send("Member not found.")
         return
+    role = discord.utils.get(interaction.guild.roles, name=tier.value)
+    if not role:
+        await interaction.followup.send("Tier role not found.")
+        return
+    await member.add_roles(role)
+    data = load_data()
+    data[str(member.id)] = {
+        "discord_name": discord_name,
+        "username": username,
+        "region": region.value,
+        "tier": tier.value,
+        "date": datetime.utcnow().strftime("%Y-%m-%d")
+    }
+    save_data(data)
+    await interaction.followup.send(f"✅ {tier.value} given to {discord_name}")
+    log_channel = bot.get_channel(TIER_LOG_CHANNEL_ID)
+    if log_channel:
+        await log_channel.send(f"🎖️ {tier.value} assigned to {discord_name} ({username}) in region {region.value} on {data[str(member.id)]['date']}")
 
-    view = TicketView(interaction.user)
-    await interaction.response.send_message("📬 **Select a ticket option below to create your ticket:**", view=view)
+@bot.tree.command(name="removetier", description="Remove a specific tier", guild=discord.Object(id=GUILD_ID))
+@app_commands.choices(
+    tier=[app_commands.Choice(name=t, value=t) for t in TIER_ROLES]
+)
+async def removetier(interaction: discord.Interaction, member: discord.Member, tier: app_commands.Choice[str]):
+    await member.remove_roles(discord.utils.get(interaction.guild.roles, name=tier.value))
+    await interaction.response.send_message(f"❌ Removed {tier.value} from {member.display_name}", ephemeral=False)
 
-@bot.tree.command(name="adduser", description="Add a user to this ticket channel")
-@app_commands.describe(user="User to add")
-async def add_user(interaction: Interaction, user: discord.Member):
-    channel = interaction.channel
-    if isinstance(channel, discord.TextChannel):
-        await channel.set_permissions(user, view_channel=True, send_messages=True, read_message_history=True)
-        await interaction.response.send_message(f"✅ {user.mention} has been added to the ticket.", ephemeral=True)
+@bot.tree.command(name="tier", description="Check a user's tier", guild=discord.Object(id=GUILD_ID))
+async def tier(interaction: discord.Interaction, member: discord.Member = None):
+    await interaction.response.defer(ephemeral=True)
+    member = member or interaction.user
+    data = load_data()
+    entry = data.get(str(member.id))
+    if entry:
+        msg = f"**Username:** {entry['username']}\n**Discord:** {entry['discord_name']}\n**Tier:** {entry['tier']}\n**Region:** {entry['region']}\n**Date:** {entry['date']}"
+    else:
+        msg = "No tier data found."
+    await interaction.followup.send(msg)
 
-@bot.tree.command(name="removeuser", description="Remove a user from this ticket channel")
-@app_commands.describe(user="User to remove")
-async def remove_user(interaction: Interaction, user: discord.Member):
-    channel = interaction.channel
-    if isinstance(channel, discord.TextChannel):
-        await channel.set_permissions(user, overwrite=None)
-        await interaction.response.send_message(f"✅ {user.mention} has been removed from the ticket.", ephemeral=True)
+@bot.tree.command(name="database", description="Show all tier assignments", guild=discord.Object(id=GUILD_ID))
+async def database(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    data = load_data()
+    msg = "\n".join([f"{v['discord_name']} | {v['username']} | {v['tier']}" for v in data.values()])
+    await interaction.followup.send(msg or "No data yet.")
 
-# Start the bot
-bot.run(os.environ['TOKEN'])
+@bot.tree.command(name="setup_ticket", description="Setup ticket system", guild=discord.Object(id=GUILD_ID))
+async def setup_ticket(interaction: discord.Interaction):
+    await interaction.response.send_message("Ticket system setup", ephemeral=True)
+    
+    class TicketView(discord.ui.View):
+        @discord.ui.select(placeholder="Choose ticket type", options=[
+            discord.SelectOption(label="Support", value="support"),
+            discord.SelectOption(label="Whitelist", value="whitelist"),
+            discord.SelectOption(label="Purge", value="purge"),
+            discord.SelectOption(label="High test", value="high_test", description="LT3 and above only")
+        ])
+        async def select_callback(self, interaction2: discord.Interaction, select: discord.ui.Select):
+            ticket_type = select.values[0]
+            member = interaction2.user
+            if ticket_type == "high_test":
+                has_permission = any(r.name in ["LT1", "LT2", "LT3", "HT1", "HT2", "HT3"] for r in member.roles)
+                if not has_permission:
+                    await interaction2.response.send_message("You need LT3 or higher to access this option.", ephemeral=True)
+                    return
+            category = discord.utils.get(interaction2.guild.categories, name=ticket_type)
+            if not category:
+                category = await interaction2.guild.create_category(ticket_type)
+            channel_name = f"{member.name}_{ticket_type}"
+            channel = await interaction2.guild.create_text_channel(channel_name, category=category)
+            await channel.set_permissions(member, read_messages=True, send_messages=True)
+            await channel.set_permissions(interaction2.guild.default_role, read_messages=False)
+            await interaction2.response.send_message(f"Created ticket: {channel.mention}", ephemeral=True)
+            await channel.send(f"@staff {member.mention} created a **{ticket_type}** ticket.")
+
+    await interaction.channel.send("Create a ticket below:", view=TicketView())
+
+@bot.tree.command(name="adduser", description="Add user to ticket", guild=discord.Object(id=GUILD_ID))
+async def adduser(interaction: discord.Interaction, user: discord.Member):
+    await interaction.channel.set_permissions(user, read_messages=True, send_messages=True)
+    await interaction.response.send_message(f"✅ Added {user.display_name} to the ticket.")
+
+@bot.tree.command(name="removeuser", description="Remove user from ticket", guild=discord.Object(id=GUILD_ID))
+async def removeuser(interaction: discord.Interaction, user: discord.Member):
+    await interaction.channel.set_permissions(user, overwrite=None)
+    await interaction.response.send_message(f"❌ Removed {user.display_name} from the ticket.")
+
+@bot.tree.command(name="close", description="Close the ticket in 5 seconds", guild=discord.Object(id=GUILD_ID))
+async def close(interaction: discord.Interaction):
+    await interaction.response.send_message("⏳ Closing ticket in 5 seconds...")
+    await discord.utils.sleep_until(datetime.utcnow() + timedelta(seconds=5))
+    await interaction.channel.delete()
+
+bot.run(TOKEN)
