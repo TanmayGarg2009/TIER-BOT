@@ -7,7 +7,7 @@ from datetime import datetime
 
 TOKEN = os.getenv("TOKEN") or "YOUR_TOKEN_HERE"
 GUILD_ID = 1346134488547332217  # Replace with your server ID
-TIER_LOG_CHANNEL_ID = 123456789012345678  # Replace with your log channel ID
+TIER_LOG_CHANNEL_ID = 1346137032933642351  # Replace with your log channel ID
 
 TIER_ROLES = ["HT1", "HT2", "HT3", "LT1", "LT2", "LT3", "LT4", "LT5"]
 DATA_FILE = "tiers.json"
