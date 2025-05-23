@@ -1,154 +1,188 @@
 import discord
+from discord.ext import commands, tasks
 from discord import app_commands
-from discord.ext import commands
-import json
+import sqlite3
+import datetime
 import os
-from datetime import datetime
 
-TOKEN = os.getenv("TOKEN") or "YOUR_TOKEN_HERE"
-GUILD_ID = 1346134488547332217  # Replace with your server ID
-TIER_LOG_CHANNEL_ID = 1346137032933642351  # Replace with your log channel ID
+# --- Bot Setup ---
+intents = discord.Intents.all()
+bot = commands.Bot(command_prefix="/", intents=intents)
+tree = bot.tree
 
-TIER_ROLES = ["HT1", "HT2", "HT3", "LT1", "LT2", "LT3", "LT4", "LT5"]
-DATA_FILE = "tiers.json"
+# --- Database Setup ---
+db = sqlite3.connect("tiers.db")
+cursor = db.cursor()
+cursor.execute(
+    '''CREATE TABLE IF NOT EXISTS tiers (
+        user_id INTEGER PRIMARY KEY,
+        discord_name TEXT,
+        username TEXT,
+        region TEXT,
+        tier TEXT,
+        assign_date TEXT
+    )'''
+)
+db.commit()
 
-intents = discord.Intents.default()
-intents.members = True
-intents.guilds = True
-intents.message_content = True
+# --- Config ---
+tier_roles = ["HT1","HT2","HT3","HT4","HT5","LT1","LT2","LT3","LT4","LT5"]
+region_choices = [app_commands.Choice(name="AS", value="AS"), app_commands.Choice(name="NA", value="NA"), app_commands.Choice(name="EU", value="EU")]
+tier_choices = [app_commands.Choice(name=t, value=t) for t in tier_roles]
+TIER_CHANNEL_ID = 1346137032933642351
+GUILD_ID = 1346134488547332217
+STAFF_ROLE_NAME = "staff"
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+# --- Helper Functions ---
+def sync_roles(guild):
+    for member in guild.members:
+        roles = [r for r in member.roles if r.name in tier_roles]
+        if roles:
+            highest = sorted(roles, key=lambda r: tier_roles.index(r.name))[0].name
+            cursor.execute(
+                "REPLACE INTO tiers (user_id, discord_name, username, region, tier, assign_date) VALUES (?, ?, ?, ?, ?, ?)",
+                (member.id, member.display_name, member.name, "Unknown", highest, str(datetime.date.today()))
+            )
+    db.commit()
 
-def load_data():
-    if not os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "w") as f:
-            json.dump({}, f)
-    with open(DATA_FILE, "r") as f:
-        return json.load(f)
-
-def save_data(data):
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f, indent=4)
-
-def get_highest_tier(roles):
-    tier_order = {role: i for i, role in enumerate(TIER_ROLES)}
-    user_tiers = [r.name for r in roles if r.name in tier_order]
-    if not user_tiers:
-        return None
-    return min(user_tiers, key=lambda r: tier_order[r])
-
+# --- Sync on Ready ---
 @bot.event
 async def on_ready():
-    await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
+    await tree.sync(guild=discord.Object(id=GUILD_ID))
     print(f"Logged in as {bot.user}")
 
-@bot.tree.command(name="givetier", description="Assign a tier role", guild=discord.Object(id=GUILD_ID))
-@app_commands.describe(discord_name="Their Discord name", username="Their in-game username", region="AS/NA/EU", tier="Tier to assign")
-@app_commands.choices(
-    region=[
-        app_commands.Choice(name="Asia", value="AS"),
-        app_commands.Choice(name="North America", value="NA"),
-        app_commands.Choice(name="Europe", value="EU")
-    ],
-    tier=[app_commands.Choice(name=t, value=t) for t in TIER_ROLES]
-)
-async def givetier(interaction: discord.Interaction, discord_name: str, username: str, region: app_commands.Choice[str], tier: app_commands.Choice[str]):
-    await interaction.response.defer(ephemeral=False)
-    member = interaction.guild.get_member_named(discord_name)
-    if not member:
-        await interaction.followup.send("Member not found.")
-        return
+# --- Tier Commands ---
+@tree.command(name="givetier", description="Assign a tier role to a user", guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(user="Select a member", username="Enter username", region="Select region", tier="Select tier")
+@app_commands.choices(region=region_choices, tier=tier_choices)
+async def givetier(interaction: discord.Interaction, user: discord.Member, username: str, region: app_commands.Choice[str], tier: app_commands.Choice[str]):
+    await sync_roles(interaction.guild)
     role = discord.utils.get(interaction.guild.roles, name=tier.value)
-    if not role:
-        await interaction.followup.send("Tier role not found.")
-        return
-    await member.add_roles(role)
-    data = load_data()
-    data[str(member.id)] = {
-        "discord_name": discord_name,
-        "username": username,
-        "region": region.value,
-        "tier": tier.value,
-        "date": datetime.utcnow().strftime("%Y-%m-%d")
-    }
-    save_data(data)
-    await interaction.followup.send(f"✅ {tier.value} given to {discord_name}")
-    log_channel = bot.get_channel(TIER_LOG_CHANNEL_ID)
-    if log_channel:
-        await log_channel.send(f"🎖️ {tier.value} assigned to {discord_name} ({username}) in region {region.value} on {data[str(member.id)]['date']}")
+    if role:
+        await user.add_roles(role)
+    cursor.execute(
+        "REPLACE INTO tiers (user_id, discord_name, username, region, tier, assign_date) VALUES (?, ?, ?, ?, ?, ?)",
+        (user.id, user.display_name, username, region.value, tier.value, str(datetime.date.today()))
+    )
+    db.commit()
+    # Public confirmation
+    await interaction.response.send_message(f"Assigned {tier.value} to {user.display_name}")
+    # Send summary to tier channel
+    ch = interaction.guild.get_channel(TIER_CHANNEL_ID)
+    if ch:
+        await ch.send(
+            f"{user.mention}\n" +
+            f"Discord Name: {user.display_name}\n" +
+            f"Username: {username}\n" +
+            f"Region: {region.value}\n" +
+            f"Tier Earned: {tier.value}\n" +
+            f"Date: {str(datetime.date.today())}"
+        )
 
-@bot.tree.command(name="removetier", description="Remove a specific tier", guild=discord.Object(id=GUILD_ID))
-@app_commands.choices(
-    tier=[app_commands.Choice(name=t, value=t) for t in TIER_ROLES]
-)
-async def removetier(interaction: discord.Interaction, member: discord.Member, tier: app_commands.Choice[str]):
-    await member.remove_roles(discord.utils.get(interaction.guild.roles, name=tier.value))
-    await interaction.response.send_message(f"❌ Removed {tier.value} from {member.display_name}", ephemeral=False)
+@tree.command(name="removetier", description="Remove a tier role from a user", guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(user="Select a member", tier="Select tier to remove")
+@app_commands.choices(tier=tier_choices)
+async def removetier(interaction: discord.Interaction, user: discord.Member, tier: app_commands.Choice[str]):
+    role = discord.utils.get(interaction.guild.roles, name=tier.value)
+    if role in user.roles:
+        await user.remove_roles(role)
+    cursor.execute("SELECT tier FROM tiers WHERE user_id = ?", (user.id,))
+    row = cursor.fetchone()
+    if row and row[0] == tier.value:
+        cursor.execute("DELETE FROM tiers WHERE user_id = ?", (user.id,))
+        db.commit()
+    await interaction.response.send_message(f"Removed {tier.value} from {user.display_name}")
 
-@bot.tree.command(name="tier", description="Check a user's tier", guild=discord.Object(id=GUILD_ID))
-async def tier(interaction: discord.Interaction, member: discord.Member = None):
-    await interaction.response.defer(ephemeral=True)
-    member = member or interaction.user
-    data = load_data()
-    entry = data.get(str(member.id))
-    if entry:
-        msg = f"**Username:** {entry['username']}\n**Discord:** {entry['discord_name']}\n**Tier:** {entry['tier']}\n**Region:** {entry['region']}\n**Date:** {entry['date']}"
+@tree.command(name="tier", description="Show a user’s tier info", guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(user="Select a member")
+async def tier(interaction: discord.Interaction, user: discord.Member):
+    await sync_roles(interaction.guild)
+    cursor.execute("SELECT username, discord_name, tier, assign_date, region FROM tiers WHERE user_id = ?", (user.id,))
+    data = cursor.fetchone()
+    if data:
+        await interaction.response.send_message(
+            f"Username: {data[0]}\n" +
+            f"Discord Name: {data[1]}\n" +
+            f"Tier: {data[2]}\n" +
+            f"Date: {data[3]}\n" +
+            f"Region: {data[4]}",
+            ephemeral=True
+        )
     else:
-        msg = "No tier data found."
-    await interaction.followup.send(msg)
+        await interaction.response.send_message("No tier data found.", ephemeral=True)
 
-@bot.tree.command(name="database", description="Show all tier assignments", guild=discord.Object(id=GUILD_ID))
+@tree.command(name="database", description="List all users’ tiers", guild=discord.Object(id=GUILD_ID))
 async def database(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    data = load_data()
-    msg = "\n".join([f"{v['discord_name']} | {v['username']} | {v['tier']}" for v in data.values()])
-    await interaction.followup.send(msg or "No data yet.")
+    await sync_roles(interaction.guild)
+    cursor.execute("SELECT discord_name, username, tier FROM tiers")
+    rows = cursor.fetchall()
+    msg = "\n".join([f"{r[0]} | {r[1]} | {r[2]}" for r in rows]) or "No data."
+    await interaction.response.send_message(msg, ephemeral=True)
 
-@bot.tree.command(name="setup_ticket", description="Setup ticket system", guild=discord.Object(id=GUILD_ID))
+# --- Ticket System ---
+class TicketView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(TicketSelect())
+
+class TicketSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="Support"),
+            discord.SelectOption(label="Appeal"),
+            discord.SelectOption(label="Whitelist Request"),
+            discord.SelectOption(label="Partnership"),
+            discord.SelectOption(label="Others")
+        ]
+        super().__init__(placeholder="Select ticket type...", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        ticket_type = self.values[0]
+        # Category
+        cat = discord.utils.get(interaction.guild.categories, name=ticket_type)
+        if not cat:
+            cat = await interaction.guild.create_category(ticket_type)
+        # Channel
+        chan_name = f"{interaction.user.display_name}_{ticket_type.lower().replace(' ', '_')}"
+        overwrites = {
+            interaction.guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True)
+        }
+        staff = discord.utils.get(interaction.guild.roles, name=STAFF_ROLE_NAME)
+        if staff:
+            overwrites[staff] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+        ch = await cat.create_text_channel(chan_name, overwrites=overwrites)
+        await ch.send(f"{staff.mention if staff else ''} {interaction.user.mention}")
+        await interaction.response.send_message(f"Ticket created: {ch.mention}", ephemeral=True)
+
+@tree.command(name="setup_ticket", description="Deploy ticket panel", guild=discord.Object(id=GUILD_ID))
 async def setup_ticket(interaction: discord.Interaction):
-    await interaction.response.send_message("Ticket system setup", ephemeral=True)
-    
-    class TicketView(discord.ui.View):
-        @discord.ui.select(placeholder="Choose ticket type", options=[
-            discord.SelectOption(label="Support", value="support"),
-            discord.SelectOption(label="Whitelist", value="whitelist"),
-            discord.SelectOption(label="Purge", value="purge"),
-            discord.SelectOption(label="High test", value="high_test", description="LT3 and above only")
-        ])
-        async def select_callback(self, interaction2: discord.Interaction, select: discord.ui.Select):
-            ticket_type = select.values[0]
-            member = interaction2.user
-            if ticket_type == "high_test":
-                has_permission = any(r.name in ["LT1", "LT2", "LT3", "HT1", "HT2", "HT3"] for r in member.roles)
-                if not has_permission:
-                    await interaction2.response.send_message("You need LT3 or higher to access this option.", ephemeral=True)
-                    return
-            category = discord.utils.get(interaction2.guild.categories, name=ticket_type)
-            if not category:
-                category = await interaction2.guild.create_category(ticket_type)
-            channel_name = f"{member.name}_{ticket_type}"
-            channel = await interaction2.guild.create_text_channel(channel_name, category=category)
-            await channel.set_permissions(member, read_messages=True, send_messages=True)
-            await channel.set_permissions(interaction2.guild.default_role, read_messages=False)
-            await interaction2.response.send_message(f"Created ticket: {channel.mention}", ephemeral=True)
-            await channel.send(f"@staff {member.mention} created a **{ticket_type}** ticket.")
+    embed = discord.Embed(title="🎫 Create a Ticket", description="Select from the menu below.", color=discord.Color.blurple())
+    view = TicketView()
+    await interaction.response.send_message(embed=embed, view=view)
 
-    await interaction.channel.send("Create a ticket below:", view=TicketView())
-
-@bot.tree.command(name="adduser", description="Add user to ticket", guild=discord.Object(id=GUILD_ID))
+@tree.command(name="adduser", description="Add a user to this ticket channel", guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(user="Select a member to add")
 async def adduser(interaction: discord.Interaction, user: discord.Member):
-    await interaction.channel.set_permissions(user, read_messages=True, send_messages=True)
-    await interaction.response.send_message(f"✅ Added {user.display_name} to the ticket.")
+    channel = interaction.channel
+    await channel.set_permissions(user, view_channel=True, send_messages=True)
+    await interaction.response.send_message(f"Added {user.mention} to the ticket.", ephemeral=True)
 
-@bot.tree.command(name="removeuser", description="Remove user from ticket", guild=discord.Object(id=GUILD_ID))
+@tree.command(name="removeuser", description="Remove a user from this ticket channel", guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(user="Select a member to remove")
 async def removeuser(interaction: discord.Interaction, user: discord.Member):
-    await interaction.channel.set_permissions(user, overwrite=None)
-    await interaction.response.send_message(f"❌ Removed {user.display_name} from the ticket.")
+    channel = interaction.channel
+    await channel.set_permissions(user, overwrite=None)
+    await interaction.response.send_message(f"Removed {user.mention} from the ticket.", ephemeral=True)
 
-@bot.tree.command(name="close", description="Close the ticket in 5 seconds", guild=discord.Object(id=GUILD_ID))
+@tree.command(name="close", description="Close the ticket channel", guild=discord.Object(id=GUILD_ID))
 async def close(interaction: discord.Interaction):
-    await interaction.response.send_message("⏳ Closing ticket in 5 seconds...")
-    await discord.utils.sleep_until(datetime.utcnow() + timedelta(seconds=5))
-    await interaction.channel.delete()
+    channel = interaction.channel
+    await interaction.response.send_message("Closing ticket...", ephemeral=True)
+    await channel.delete()
 
-bot.run(TOKEN)
+@tree.command(name="handle", description="Mark this ticket as being handled", guild=discord.Object(id=GUILD_ID))
+async def handle(interaction: discord.Interaction):
+    await interaction.response.send_message(f"{interaction.user.mention} is handling this ticket.")
+
+bot.run(os.getenv("TOKEN"))
